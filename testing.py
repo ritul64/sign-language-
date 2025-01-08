@@ -1,133 +1,97 @@
 import cv2
+from cvzone.HandTrackingModule import HandDetector
+from cvzone.ClassificationModule import Classifier
 import numpy as np
-import tkinter as tk
-from tkinter import filedialog, Text
-from tensorflow.keras.models import load_model
-from PIL import Image, ImageTk
-import mediapipe as mp
+import math
+from collections import deque
 
-# Load pre-trained model
-model = load_model("C:/Users/ritul/OneDrive/Desktop/projects/sign language/Model/sign_language_model.keras")
-
-# Initialize MediaPipe hands
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1, min_detection_confidence=0.5)
-
-# Initialize the main Tkinter window
-root = tk.Tk()
-root.title("Sign Language to Text")
-
-# Create a frame for video feed and prediction display
-video_frame = tk.Frame(root)
-video_frame.pack(side=tk.LEFT, padx=10, pady=10)
-
-# Initialize webcam feed
+# Initialize webcam and modules
 cap = cv2.VideoCapture(0)
+detector = HandDetector(maxHands=1)
+classifier = Classifier("C:/Users/ritul/OneDrive/Desktop/projects/sign language/Model/keras_model.h5",
+                        "C:/Users/ritul/OneDrive/Desktop/projects/sign language/Model/labels.txt")
 
-# Tkinter Label to display the video frame
-label_video = tk.Label(video_frame)
-label_video.pack()
+# Constants
+offset = 20
+imgSize = 300
+labels = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N",
+          "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"]
 
-# Initialize the text output
-text_display = tk.Text(root, height=5, width=50)
-text_display.pack(side=tk.BOTTOM, padx=10, pady=10)
+# Sliding window for smoothing predictions
+smooth_predictions = deque(maxlen=10)
 
-# Functions for buttons
-def clear_text():
-    text_display.delete("1.0", tk.END)
+while True:
+    success, img = cap.read()
+    if not success:
+        print("Failed to grab frame")
+        break
+    
+    imgOutput = img.copy()
+    hands, img = detector.findHands(img)
+    
+    if hands:
+        hand = hands[0]
+        x, y, w, h = hand['bbox']
 
-def save_to_file():
-    file_path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files", "*.txt")])
-    if file_path:
-        with open(file_path, "w") as f:
-            f.write(text_display.get("1.0", tk.END))
+        # Create a white image
+        imgWhite = np.ones((imgSize, imgSize, 3), np.uint8) * 255
 
-def quit_app():
-    cap.release()
-    cv2.destroyAllWindows()
-    root.destroy()
+        # Crop hand region
+        try:
+            imgCrop = img[y - offset:y + h + offset, x - offset:x + w + offset]
+        except:
+            continue
 
-# Button controls
-button_frame = tk.Frame(root)
-button_frame.pack(side=tk.BOTTOM, pady=10)
+        imgCropShape = imgCrop.shape
+        aspectRatio = h / w
 
-btn_clear = tk.Button(button_frame, text="Clear All", command=clear_text, width=20, height=2, bg="khaki")
-btn_clear.grid(row=0, column=0, padx=5)
+        # Resize and center the cropped hand image
+        if aspectRatio > 1:
+            k = imgSize / h
+            wCal = math.ceil(k * w)
+            imgResize = cv2.resize(imgCrop, (wCal, imgSize))
+            wGap = math.ceil((imgSize - wCal) / 2)
+            imgWhite[:, wGap:wCal + wGap] = imgResize
+        else:
+            k = imgSize / w
+            hCal = math.ceil(k * h)
+            imgResize = cv2.resize(imgCrop, (imgSize, hCal))
+            hGap = math.ceil((imgSize - hCal) / 2)
+            imgWhite[hGap:hCal + hGap, :] = imgResize
 
-btn_save = tk.Button(button_frame, text="Save to a Text File", command=save_to_file, width=20, height=2, bg="light green")
-btn_save.grid(row=0, column=1, padx=5)
+        # Get prediction
+        prediction, index = classifier.getPrediction(imgWhite, draw=False)
+        confidence = max(prediction)
 
-btn_quit = tk.Button(button_frame, text="Quit", command=quit_app, width=20, height=2, bg="indian red")
-btn_quit.grid(row=0, column=2, padx=5)
+        # Debugging: print prediction and confidence
+        print(f"Prediction: {prediction}, Confidence: {confidence}")
 
-# Load label list for alphabet
-labels = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'Space', 'Delete']
+        # Apply confidence threshold (optional: you can adjust this)
+        if confidence > 0.5:
+            smooth_predictions.append(labels[index])
+        else:
+            smooth_predictions.append("")
 
-def process_frame():
-    ret, frame = cap.read()
-    if ret:
-        # Flip the frame for a mirrored effect
-        frame = cv2.flip(frame, 1)
+        # Get the most common prediction in the window
+        final_prediction = max(set(smooth_predictions), key=smooth_predictions.count)
 
-        # Process the image and detect hands
-        image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = hands.process(image_rgb)
+        # Display prediction
+        cv2.rectangle(imgOutput, (x - offset, y - offset - 50),
+                      (x - offset + 120, y - offset - 10), (255, 0, 255), cv2.FILLED)
+        cv2.putText(imgOutput, final_prediction, (x, y - 30),
+                    cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 2)
+        cv2.rectangle(imgOutput, (x - offset, y - offset),
+                      (x + w + offset, y + h + offset), (255, 0, 255), 4)
 
-        # If hands are detected
-        if results.multi_hand_landmarks:
-            for hand_landmarks in results.multi_hand_landmarks:
-                # Draw hand landmarks
-                mp.solutions.drawing_utils.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+        # Show cropped and processed images
+        cv2.imshow("ImageCrop", imgCrop)
+        cv2.imshow("ImageWhite", imgWhite)
 
-                # Get bounding box for the hand
-                h, w, _ = frame.shape
-                x_min = int(min([landmark.x for landmark in hand_landmarks.landmark]) * w)
-                x_max = int(max([landmark.x for landmark in hand_landmarks.landmark]) * w)
-                y_min = int(min([landmark.y for landmark in hand_landmarks.landmark]) * h)
-                y_max = int(max([landmark.y for landmark in hand_landmarks.landmark]) * h)
+    # Display the output
+    cv2.imshow("Image", imgOutput)
+    key = cv2.waitKey(1)
+    if key == 27:  # Press 'Esc' to exit
+        break
 
-                # Extract the region of interest (ROI) for prediction
-                roi = frame[y_min:y_max, x_min:x_max]
-                if roi.size > 0:
-                    # Preprocess the ROI for model prediction
-                    resized_frame = cv2.resize(roi, (160, 160))  # Resize frame to match model input size
-                    normalized_frame = resized_frame / 255.0  # Normalize frame
-                    input_frame = np.expand_dims(normalized_frame, axis=0)  # Expand dimensions
-
-                    # Make prediction
-                    prediction = model.predict(input_frame)
-                    predicted_class = np.argmax(prediction)
-                    confidence = np.max(prediction)
-
-                    # Print predictions for debugging
-                    print(f"Predicted class: {predicted_class}, Confidence: {confidence}")
-
-                    if confidence > 0.5:  # Adjust the threshold as needed
-                        predicted_label = labels[predicted_class]
-                        print(f"Detected label: {predicted_label}")
-
-                        # Display prediction on the text box
-                        if predicted_label == "Space":
-                            text_display.insert(tk.END, " ")
-                        elif predicted_label == "Delete":
-                            current_text = text_display.get("1.0", tk.END)[:-2]
-                            text_display.delete("1.0", tk.END)
-                            text_display.insert(tk.END, current_text)
-                        else:
-                            text_display.insert(tk.END, predicted_label)
-
-        # Convert the frame to RGB and display in the Tkinter label
-        img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        img_rgb = cv2.resize(img_rgb, (300, 300))
-        img_tk = ImageTk.PhotoImage(image=Image.fromarray(img_rgb))
-        label_video.imgtk = img_tk
-        label_video.configure(image=img_tk)
-
-    # Call this function again after 10 ms
-    root.after(10, process_frame)
-
-# Start video processing
-process_frame()
-
-# Run the Tkinter main loop
-root.mainloop()
+cap.release()
+cv2.destroyAllWindows()
