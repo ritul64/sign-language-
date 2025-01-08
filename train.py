@@ -2,105 +2,96 @@ import os
 import tensorflow as tf
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
-from tensorflow.keras.applications import MobileNetV2
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-import warnings
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout, BatchNormalization, Activation, GlobalAveragePooling2D
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, LearningRateScheduler
+from sklearn.utils.class_weight import compute_class_weight
+import numpy as np
+import os
 
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-warnings.filterwarnings("ignore", category=UserWarning, module='keras')
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # Forces TensorFlow to use only the CPU
 
-# Enable mixed precision (if GPU supports)
-from tensorflow.keras.mixed_precision import set_global_policy
-set_global_policy('mixed_float16')
+# Paths to dataset
+train_dir = r"C:\Users\ritul\OneDrive\Desktop\projects\sign language\dataset\asl_alphabet_train"  //YOUR OWN PATH
+test_dir = r"C:\Users\ritul\OneDrive\Desktop\projects\sign language\dataset\asl_alphabet_test"    
 
-# Set paths for your dataset
-train_data_dir = 'C:\\Users\\ritul\\OneDrive\\Desktop\\projects\\sign language\\dataset\\asl_alphabet_train\\asl_alphabet_train'
+# Image properties
+IMG_SIZE = 128  # Resize all images to 128x128
+BATCH_SIZE = 32  # Batch size
 
-# Ensure the directory exists
-if not os.path.exists(train_data_dir):
-    print(f"The specified directory does not exist: {train_data_dir}")
-    exit(1)
-
-# Parameters
-img_height, img_width = 224, 224  # Maintain high resolution
-batch_size = 32  # Moderate batch size for accuracy and memory optimization
-num_classes = 29  # Number of classes in dataset
-
-# Data Generators with validation split
+# Data augmentation and preprocessing
 train_datagen = ImageDataGenerator(
-    rescale=1.0 / 255.0,
-    rotation_range=20,
-    width_shift_range=0.2,
-    height_shift_range=0.2,
-    shear_range=0.2,
-    zoom_range=0.2,
+    rescale=1.0 / 255,
+    rotation_range=30,
+    width_shift_range=0.3,
+    height_shift_range=0.3,
+    shear_range=0.3,
+    zoom_range=0.3,
     horizontal_flip=True,
     fill_mode='nearest',
-    validation_split=0.2  # 20% of the data for validation
+    brightness_range=(0.8, 1.2)
 )
 
-# Training generator
+test_datagen = ImageDataGenerator(rescale=1.0 / 255)
+
 train_generator = train_datagen.flow_from_directory(
-    train_data_dir,
-    target_size=(img_height, img_width),
-    batch_size=batch_size,
-    class_mode='sparse',  # 'sparse' is used for integer-encoded labels
-    subset='training'  # Set as training data
+    train_dir,
+    target_size=(IMG_SIZE, IMG_SIZE),
+    batch_size=BATCH_SIZE,
+    class_mode='categorical'
 )
 
-# Validation generator
-validation_generator = train_datagen.flow_from_directory(
-    train_data_dir,
-    target_size=(img_height, img_width),
-    batch_size=batch_size,
-    class_mode='sparse',  # 'sparse' is used for integer-encoded labels
-    subset='validation'  # Set as validation data
+test_generator = test_datagen.flow_from_directory(
+    test_dir,
+    target_size=(IMG_SIZE, IMG_SIZE),
+    batch_size=BATCH_SIZE,
+    class_mode='categorical'
 )
 
-# Build the Model
-base_model = MobileNetV2(weights='imagenet', include_top=False, input_shape=(img_height, img_width, 3))
-base_model.trainable = False  # Freeze base model for initial training
+# Compute class weights for imbalanced data
+class_weights = compute_class_weight(
+    'balanced',
+    classes=np.unique(train_generator.classes),
+    y=train_generator.classes
+)
+class_weights = dict(enumerate(class_weights))
+
+# Model architecture
+base_model = tf.keras.applications.MobileNetV2(input_shape=(IMG_SIZE, IMG_SIZE, 3), include_top=False, weights='imagenet')
+base_model.trainable = False  # Freeze the base model layers
 
 model = Sequential([
     base_model,
     GlobalAveragePooling2D(),
+    Dense(256, activation='relu'),
     Dropout(0.5),
-    Dense(num_classes, activation='softmax', dtype='float32')  # Specify float32 for the output layer
+    Dense(train_generator.num_classes, activation='softmax')
 ])
 
-# Compile the Model
-model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),  # Custom learning rate for stability
-              loss='sparse_categorical_crossentropy',
-              metrics=['accuracy'])
+# Compile the model with an SGD optimizer and gradient clipping
+optimizer = tf.keras.optimizers.SGD(learning_rate=0.01, momentum=0.9, clipvalue=1.0)
+model.compile(optimizer=optimizer, loss='categorical_crossentropy', metrics=['accuracy'])
 
-# Callbacks
+# Callbacks for better training
 early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=2, min_lr=1e-6)
+checkpoint = ModelCheckpoint(r"C:\Users\ritul\OneDrive\Desktop\projects\sign language\Model\keras_model.h5",
+                             monitor='val_loss', save_best_only=True)
+reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=3, min_lr=1e-5)
 
-# Train the Model with Frozen Base
-initial_epochs = 15
+# Optional: Add a learning rate scheduler
+lr_scheduler = LearningRateScheduler(lambda epoch: 1e-3 * 10 ** (-epoch / 10))
+
+# Train the model
 history = model.fit(
     train_generator,
-    epochs=initial_epochs,
-    validation_data=validation_generator,
-    callbacks=[early_stopping, reduce_lr]
+    epochs=20,
+    validation_data=test_generator,
+    class_weight=class_weights,
+    callbacks=[early_stopping, checkpoint, reduce_lr, lr_scheduler]
 )
 
-# Unfreeze last layers and fine-tune
-base_model.trainable = True
-for layer in base_model.layers[:-20]:  # Unfreeze last 20 layers for fine-tuning
-    layer.trainable = False
+# Evaluate the model
+test_loss, test_acc = model.evaluate(test_generator)
+print(f"Test Accuracy: {test_acc * 100:.2f}%")
 
-fine_tune_epochs = 5
-total_epochs = initial_epochs + fine_tune_epochs
-history_fine = model.fit(
-    train_generator,
-    epochs=total_epochs,
-    validation_data=validation_generator,
-    callbacks=[early_stopping, reduce_lr],
-    initial_epoch=history.epoch[-1]
-)
-
-# Save the Model
-model.save('C:\\Users\\ritul\\OneDrive\\Desktop\\projects\\sign language\\Model\\sign_language_model.keras')
+# Save the model
+model.save(r"C:\Users\ritul\OneDrive\Desktop\projects\sign language\Model\keras_model.h5")
