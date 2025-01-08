@@ -94,4 +94,5 @@ test_loss, test_acc = model.evaluate(test_generator)
 print(f"Test Accuracy: {test_acc * 100:.2f}%")
 
 # Save the model
-model.save(r"C:\Users\ritul\OneDrive\Desktop\projects\sign language\Model\keras_model.h5")
+model.save(r"C:\Users\ritul\OneDrive\Desktop\projects\sign language\Model\keras_model.h5") //saved file 
+
